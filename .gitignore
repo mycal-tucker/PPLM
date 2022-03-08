@@ -1,2 +1,7 @@
 venv
 .idea
+
+.data
+__pycache__
+paper_code/__pycache__
+paper_code/discrim_models

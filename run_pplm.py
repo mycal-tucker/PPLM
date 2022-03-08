@@ -84,6 +84,14 @@ DISCRIMINATOR_MODELS_PARAMS = {
         "default_class": 3,
         "pretrained_model": "gpt2-medium",
     },
+    "gender-wizard": {
+        "path": "paper_code/discrim_models/gender-wizard_classifierhead.pt",
+        "class_size": 3,
+        "embed_size": 1024,
+        "class_vocab": {"neutral": 0, "female": 1, "male": 2},
+        "default_class": 0,
+        "pretrained_model": "gpt2-medium",
+    },
 }
 
 
@@ -136,7 +144,7 @@ def perturb_past(
         device='cuda',
         verbosity_level=REGULAR
 ):
-    # Generate inital perturbed past
+    # Generate initial perturbed past
     grad_accumulator = [
         (np.zeros(p.shape).astype("float32"))
         for p in past
@@ -232,7 +240,7 @@ def perturb_past(
                 curr_hidden = curr_all_hidden[-1]
                 new_accumulated_hidden = new_accumulated_hidden + torch.sum(
                     curr_hidden, dim=1)
-
+            # TODO: mycal. I think new_accumulated hidden is the latent I want, right?
             prediction = classifier(new_accumulated_hidden /
                                     (curr_length + 1 + horizon_length))
 
@@ -566,7 +574,7 @@ def generate_text_pplm(
         unpert_logits, unpert_past, unpert_all_hidden = model(output_so_far)
         unpert_last_hidden = unpert_all_hidden[-1]
 
-        # check if we are abowe grad max length
+        # check if we are above grad max length
         if i >= grad_length:
             current_stepsize = stepsize * 0
         else:
@@ -882,7 +890,7 @@ if __name__ == '__main__':
         "-D",
         type=str,
         default=None,
-        choices=("clickbait", "sentiment", "toxicity", "generic"),
+        choices=("clickbait", "sentiment", "toxicity", "gender-wizard", "generic"),
         help="Discriminator to use",
     )
     parser.add_argument('--discrim_weights', type=str, default=None,

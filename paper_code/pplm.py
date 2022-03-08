@@ -185,6 +185,10 @@ def latent_perturb(model, args, context=None, sample=True, device='cuda'):
         classifier.load_state_dict(torch.load("discrim_models/toxicity_classifierhead.pt"))
         classifier.eval()
         args.label_class = 0 # not toxic
+    elif args.discrim == 'gender-wizard':
+        classifier = ClassificationHead(class_size=3, embed_size=1024).to(device)
+        classifier.load_state_dict(torch.load("discrim_models/gender-wizard_classifierhead.pt"))
+        classifier.eval()
     else:
         classifier = None
 
@@ -354,7 +358,7 @@ def run_model():
     parser.add_argument('--bag-of-words', '-B', type=str, default=None, 
                         help='Bags of words used for PPLM-BoW. Multiple BoWs separated by ;')
     parser.add_argument('--discrim', '-D', type=str, default=None, 
-                        choices=('clickbait', 'sentiment', 'toxicity'), 
+                        choices=('clickbait', 'sentiment', 'toxicity', 'gender-wizard'),
                         help='Discriminator to use for loss-type 2')
     parser.add_argument('--label-class', type=int, default=-1, help='Class label used for the discriminator')
     parser.add_argument('--stepsize', type=float, default=0.02)

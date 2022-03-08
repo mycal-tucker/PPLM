@@ -21,13 +21,15 @@ from torchtext import datasets
 from tqdm import tqdm, trange
 from transformers import BertTokenizer, BertModel
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from datasets import load_dataset
 
 from pplm_classification_head import ClassificationHead
 
 torch.manual_seed(0)
 np.random.seed(0)
 EPSILON = 1e-10
-example_sentence = "This is incredible! I love it, this is the best chicken I have ever had."
+# example_sentence = "This is incredible! I love it, this is the best chicken I have ever had."
+example_sentence = "The person reached into his backpack."
 max_length_seq = 100
 
 
@@ -512,7 +514,60 @@ def train_discriminator(
             "class_vocab": class2idx,
             "default_class": 0,
         }
+    elif dataset == 'gender-wizard':
+        print("TODO, load some gender dataset")
+        idx2class = ["neutral", "female", "male"]
+        class2idx = {c: i for i, c in enumerate(idx2class)}
+        discriminator = Discriminator(
+            class_size=len(idx2class),
+            pretrained_model=pretrained_model,
+            cached_mode=cached,
+            device=device
+        ).to(device)
 
+        raw_data = load_dataset("md_gender_bias", "wizard")
+        x = []
+        y = []
+        for line in raw_data.get('train'):
+            text = line.get('text')
+            gender = line.get('gender')
+            seq = discriminator.tokenizer.encode(text)
+            if len(seq) < max_length_seq:
+                if add_eos_token:
+                    seq = [50256] + seq
+                seq = torch.tensor(
+                    seq, device=device, dtype=torch.long
+                )
+            else:
+                continue
+            x.append(seq)
+            y.append(gender)
+        train_dataset = Dataset(x, y)
+        x = []
+        y = []
+        for line in raw_data.get('test'):
+            text = line.get('text')
+            gender = line.get('gender')
+            seq = discriminator.tokenizer.encode(text)
+            if len(seq) < max_length_seq:
+                if add_eos_token:
+                    seq = [50256] + seq
+                seq = torch.tensor(
+                    seq, device=device, dtype=torch.long
+                )
+            else:
+                continue
+            x.append(seq)
+            y.append(gender)
+        test_dataset = Dataset(x, y)
+
+        discriminator_meta = {
+            "class_size": len(idx2class),
+            "embed_size": discriminator.embed_size,
+            "pretrained_model": pretrained_model,
+            "class_vocab": class2idx,
+            "default_class": 0,
+        }
     else:  # if dataset == "generic":
         # This assumes the input dataset is a TSV with the following structure:
         # class \t text
@@ -676,7 +731,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train a discriminator on top of GPT-2 representations")
     parser.add_argument("--dataset", type=str, default="SST",
-                        choices=("SST", "clickbait", "toxic", "generic"),
+                        choices=("SST", "clickbait", "toxic", "gender-wizard", "generic"),
                         help="dataset to train the discriminator on."
                              "In case of generic, the dataset is expected"
                              "to be a TSBV file with structure: class \\t text")
