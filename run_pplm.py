@@ -134,6 +134,7 @@ def perturb_past(
         one_hot_bows_vectors=None,
         classifier=None,
         class_label=None,
+        ancillary_classifiers=None,
         loss_type=0,
         num_iterations=3,
         horizon_length=1,
@@ -192,6 +193,7 @@ def perturb_past(
 
     # accumulate perturbations for num_iterations
     loss_per_iter = []
+    ancillary_per_iter = []
     new_accumulated_hidden = None
     for i in range(num_iterations):
         if verbosity_level >= VERBOSE:
@@ -243,6 +245,16 @@ def perturb_past(
             # TODO: mycal. I think new_accumulated hidden is the latent I want, right?
             prediction = classifier(new_accumulated_hidden /
                                     (curr_length + 1 + horizon_length))
+            if ancillary_classifiers is not None:
+                ancillary_predictions = []
+                for ancillary_classifier in ancillary_classifiers:
+                    with torch.no_grad():
+                        new_pred = ancillary_classifier(new_accumulated_hidden /
+                                        (curr_length + 1 + horizon_length))
+                        new_probs = torch.softmax(new_pred, dim=1)
+                        ancillary_predictions.append(new_probs.detach().cpu().numpy())
+                ancillary_per_iter.append(ancillary_predictions)
+                # print("Ancillary predictions", ancillary_predictions)
 
             label = torch.tensor(prediction.shape[0] * [class_label],
                                  device=device,
@@ -317,7 +329,7 @@ def perturb_past(
     ]
     pert_past = list(map(add, past, grad_accumulator))
 
-    return pert_past, new_accumulated_hidden, grad_norms, loss_per_iter
+    return pert_past, new_accumulated_hidden, grad_norms, loss_per_iter, ancillary_per_iter
 
 
 def get_classifier(
@@ -412,6 +424,8 @@ def full_text_generation(
         device="cuda",
         bag_of_words=None,
         discrim=None,
+        ancillary_discrim=None,
+        ancillary_class_label=None,
         class_label=None,
         length=100,
         stepsize=0.02,
@@ -434,6 +448,10 @@ def full_text_generation(
         class_label,
         device
     )
+    if ancillary_discrim is not None:
+        ancillary_heads = [get_classifier(head, class_labels, device)[0] for head, class_labels in zip(ancillary_discrim, ancillary_class_label)]
+    else:
+        ancillary_heads = []
 
     bow_indices = []
     if bag_of_words:
@@ -459,7 +477,7 @@ def full_text_generation(
     else:
         raise Exception("Specify either a bag of words or a discriminator")
 
-    unpert_gen_tok_text, _, _ = generate_text_pplm(
+    unpert_gen_tok_text, _, _, _ = generate_text_pplm(
         model=model,
         tokenizer=tokenizer,
         context=context,
@@ -475,9 +493,10 @@ def full_text_generation(
     pert_gen_tok_texts = []
     discrim_losses = []
     losses_in_time = []
+    ancillaries_in_time = []
 
     for i in range(num_samples):
-        pert_gen_tok_text, discrim_loss, loss_in_time = generate_text_pplm(
+        pert_gen_tok_text, discrim_loss, loss_in_time, ancillary_in_time = generate_text_pplm(
             model=model,
             tokenizer=tokenizer,
             context=context,
@@ -486,6 +505,7 @@ def full_text_generation(
             bow_indices=bow_indices,
             classifier=classifier,
             class_label=class_id,
+            ancillary_classifiers=ancillary_heads,
             loss_type=loss_type,
             length=length,
             stepsize=stepsize,
@@ -506,11 +526,12 @@ def full_text_generation(
         if classifier is not None:
             discrim_losses.append(discrim_loss.data.cpu().numpy())
         losses_in_time.append(loss_in_time)
+        ancillaries_in_time.append(ancillary_in_time[-1])
 
     if device == 'cuda':
         torch.cuda.empty_cache()
 
-    return unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
+    return unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time, ancillaries_in_time
 
 
 def generate_text_pplm(
@@ -523,6 +544,7 @@ def generate_text_pplm(
         bow_indices=None,
         classifier=None,
         class_label=None,
+        ancillary_classifiers=None,
         loss_type=0,
         length=100,
         stepsize=0.02,
@@ -554,6 +576,7 @@ def generate_text_pplm(
     last = None
     unpert_discrim_loss = 0
     loss_in_time = []
+    ancillary_in_time = []
 
     if verbosity_level >= VERBOSE:
         range_func = trange(length, ascii=True)
@@ -589,7 +612,7 @@ def generate_text_pplm(
             accumulated_hidden = torch.sum(accumulated_hidden, dim=1)
 
             if past is not None:
-                pert_past, _, grad_norms, loss_this_iter = perturb_past(
+                pert_past, _, grad_norms, loss_this_iter, ancillary_pred = perturb_past(
                     past,
                     model,
                     last,
@@ -601,6 +624,7 @@ def generate_text_pplm(
                     one_hot_bows_vectors=one_hot_bows_vectors,
                     classifier=classifier,
                     class_label=class_label,
+                    ancillary_classifiers=ancillary_classifiers,
                     loss_type=loss_type,
                     num_iterations=num_iterations,
                     horizon_length=horizon_length,
@@ -612,9 +636,10 @@ def generate_text_pplm(
                     verbosity_level=verbosity_level
                 )
                 loss_in_time.append(loss_this_iter)
+                ancillary_in_time.append(ancillary_pred)
             else:
                 pert_past = past
-
+        # Here, we pass through to just observe, but one could supervise with a loss.
         pert_logits, past, pert_all_hidden = model(last, past=pert_past)
         pert_logits = pert_logits[:, -1, :] / temperature  # + SMALL_CONST
         pert_probs = F.softmax(pert_logits, dim=-1)
@@ -666,7 +691,7 @@ def generate_text_pplm(
         if verbosity_level >= REGULAR:
             print(tokenizer.decode(output_so_far.tolist()[0]))
 
-    return output_so_far, unpert_discrim_loss, loss_in_time
+    return output_so_far, unpert_discrim_loss, loss_in_time, ancillary_in_time
 
 
 def set_generic_model_params(discrim_weights, discrim_meta):
@@ -693,6 +718,8 @@ def run_pplm_example(
         discrim_weights=None,
         discrim_meta=None,
         class_label=-1,
+        ancillary_discrim=None,
+        ancillary_class_label=-1,
         length=100,
         stepsize=0.02,
         temperature=1.0,
@@ -711,6 +738,7 @@ def run_pplm_example(
         colorama=False,
         verbosity='regular'
 ):
+    print("Ancillary discrim", ancillary_discrim)
     # set Random seed
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -772,8 +800,7 @@ def run_pplm_example(
     # generate unperturbed and perturbed texts
 
     # full_text_generation returns:
-    # unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
-    unpert_gen_tok_text, pert_gen_tok_texts, _, _ = full_text_generation(
+    unpert_gen_tok_text, pert_gen_tok_texts, _, discrim_loss_in_time, ancillary_in_time = full_text_generation(
         model=model,
         tokenizer=tokenizer,
         context=tokenized_cond_text,
@@ -782,6 +809,8 @@ def run_pplm_example(
         bag_of_words=bag_of_words,
         discrim=discrim,
         class_label=class_label,
+        ancillary_discrim=ancillary_discrim,
+        ancillary_class_label=ancillary_class_label,
         length=length,
         stepsize=stepsize,
         temperature=temperature,
@@ -820,6 +849,7 @@ def run_pplm_example(
             bow_word_ids.update(w[0] for w in filtered)
 
     # iterate through the perturbed texts
+    mean_ancillaries = []
     for i, pert_gen_tok_text in enumerate(pert_gen_tok_texts):
         try:
             # untokenize unperturbed text
@@ -841,6 +871,11 @@ def run_pplm_example(
 
             print("= Perturbed generated text {} =".format(i + 1))
             print(pert_gen_text)
+            print("Discrim loss", discrim_loss_in_time[i][-1][-1])
+            print("Ancillary pred", ancillary_in_time[i][-1])
+            mean_ancillaries.append(ancillary_in_time[i][-1])  # Just the first ancillary?
+            for j in range(len(ancillary_in_time)):
+                print("Mean ancillary", np.mean(np.stack([mean_ancillary[j] for mean_ancillary in mean_ancillaries]), axis=0))
             print()
         except:
             pass
@@ -902,6 +937,16 @@ if __name__ == '__main__':
         type=int,
         default=-1,
         help="Class label used for the discriminator",
+    )
+    parser.add_argument('--ancillary_discrim', nargs='+',
+        default=[],
+        # choices=("clickbait", "sentiment", "toxicity", "gender-wizard", "generic"),
+        help="Ancillary discriminator to use",)
+    parser.add_argument(
+        "--ancillary_class_label", nargs='+',
+        # type=int,
+        default=[],
+        help="Class label used for the ancillary discriminator",
     )
     parser.add_argument("--length", type=int, default=100)
     parser.add_argument("--stepsize", type=float, default=0.02)
